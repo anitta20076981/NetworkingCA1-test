@@ -19,7 +19,7 @@ variable "eks_cluster_name" {
 variable "eks_role_name" {
   description = "IAM role name for EKS cluster"
   type        = string
-  default     = "terraform-eks-cluster-role"
+  default     = "terraform-eks-cluster-role-3"
 }
 
 variable "ecr_name" {
