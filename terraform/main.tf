@@ -11,27 +11,32 @@ provider "aws" {
   region = var.aws_region
 }
 
-# -------------------- DATA SOURCES --------------------
-# Get available availability zones
+############################################
+# DATA SOURCES
+############################################
+
+# Availability zones
 data "aws_availability_zones" "available" {}
 
-# Use an existing VPC if one is provided
+# Existing VPC (if provided)
 data "aws_vpc" "selected" {
   count = var.vpc_id != "" ? 1 : 0
   id    = var.vpc_id
 }
 
-# Use existing ECR repository instead of creating a new one
-# (prevents RepositoryAlreadyExistsException)
+# Existing ECR repository (prevents duplication error)
 data "aws_ecr_repository" "app" {
   name = var.ecr_name
 }
 
-# -------------------- VPC CREATION (if needed) --------------------
-# Only create a new VPC when no existing VPC ID is passed
+############################################
+# NETWORKING - CREATE VPC IF NOT PROVIDED
+############################################
+
 resource "aws_vpc" "main" {
   count      = var.vpc_id == "" ? 1 : 0
   cidr_block = "10.0.0.0/16"
+
   tags = {
     Name = "terraform-vpc"
   }
@@ -48,12 +53,16 @@ resource "aws_subnet" "public" {
   cidr_block              = cidrsubnet("10.0.0.0/16", 8, count.index)
   availability_zone       = data.aws_availability_zones.available.names[count.index]
   map_public_ip_on_launch = true
+
   tags = {
     Name = "public-subnet-${count.index}"
   }
 }
 
-# -------------------- IAM ROLE FOR EKS --------------------
+############################################
+# IAM ROLE FOR EKS
+############################################
+
 # Policy document for EKS assume role
 data "aws_iam_policy_document" "eks_assume_role" {
   statement {
@@ -65,18 +74,18 @@ data "aws_iam_policy_document" "eks_assume_role" {
   }
 }
 
-# Create IAM Role with unique name to avoid EntityAlreadyExists error
+# Generate random suffix to prevent duplicate IAM role names
+resource "random_id" "suffix" {
+  byte_length = 2
+}
+
+# IAM role for EKS Cluster
 resource "aws_iam_role" "eks_cluster_role" {
   name               = "${var.eks_role_name}-${random_id.suffix.hex}"
   assume_role_policy = data.aws_iam_policy_document.eks_assume_role.json
 }
 
-# Random suffix to avoid name conflicts
-resource "random_id" "suffix" {
-  byte_length = 2
-}
-
-# Attach required policies
+# Attach required EKS policies
 resource "aws_iam_role_policy_attachment" "cluster_policy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
   role       = aws_iam_role.eks_cluster_role.name
@@ -87,9 +96,13 @@ resource "aws_iam_role_policy_attachment" "vpc_cni_policy" {
   role       = aws_iam_role.eks_cluster_role.name
 }
 
-# -------------------- EKS CLUSTER --------------------
+############################################
+# EKS CLUSTER
+############################################
+
+# Add random suffix to cluster name to avoid "Cluster already exists" errors
 resource "aws_eks_cluster" "eks" {
-  name     = var.eks_cluster_name
+  name     = "${var.eks_cluster_name}-${random_id.suffix.hex}"
   role_arn = aws_iam_role.eks_cluster_role.arn
 
   vpc_config {
@@ -100,7 +113,9 @@ resource "aws_eks_cluster" "eks" {
     aws_iam_role_policy_attachment.cluster_policy,
     aws_iam_role_policy_attachment.vpc_cni_policy
   ]
-}
 
-# -------------------- OUTPUTS --------------------
-# (Defined in outputs.tf, see below)
+  tags = {
+    Name = "EKS-Cluster"
+    Environment = "Development"
+  }
+}
