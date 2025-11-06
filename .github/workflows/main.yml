@@ -1,4 +1,4 @@
-name: Deploy JS App to EC2
+name: Deploy to AWS EKS
 
 on:
   push:
@@ -7,20 +7,17 @@ on:
 env:
   AWS_REGION: eu-north-1
   IMAGE_REPO: simple-js-app
-  EC2_HOST: ${{ secrets.EC2_HOST }}
-  EC2_USER: ec2-user
-  EC2_KEY: ${{ secrets.EC2_KEY }} # base64-encoded private key
 
 jobs:
-  build-and-deploy:
+  build-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 0️⃣ Checkout code
+      # 0️⃣ Checkout code
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Step 1️⃣ Configure AWS credentials
+      # 1️⃣ Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -28,48 +25,46 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Step 2️⃣ Set up Docker Buildx for multi-arch builds
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      # 2️⃣ Terraform Init & Apply
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
 
-      # Step 3️⃣ Log in to Amazon ECR
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: terraform
+        run: terraform apply -auto-approve
+
+      # 3️⃣ Log in to Amazon ECR
       - name: Log in to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # Step 4️⃣ Build multi-arch Docker image
+      # 4️⃣ Build Docker image
       - name: Build Docker image
         run: |
           IMAGE_TAG=${{ github.sha }}
           ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}
-          docker buildx build --platform linux/amd64,linux/arm64 \
-            -t $ECR_REGISTRY/${{ env.IMAGE_REPO }}:$IMAGE_TAG \
-            -t $ECR_REGISTRY/${{ env.IMAGE_REPO }}:latest \
-            --push .
+          docker build -t $ECR_REGISTRY/${{ env.IMAGE_REPO }}:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/${{ env.IMAGE_REPO }}:$IMAGE_TAG $ECR_REGISTRY/${{ env.IMAGE_REPO }}:latest
 
-      # Step 5️⃣ SSH into EC2 and run Ansible playbook
-      - name: SSH and run Ansible
-        uses: appleboy/ssh-action@v0.1.6
-        with:
-          host: ${{ env.EC2_HOST }}
-          username: ${{ env.EC2_USER }}
-          key: ${{ secrets.EC2_KEY }}
-          script: |
-            # Navigate to your playbook directory
-            cd /home/ec2-user/ansible-js-app
+      # 5️⃣ Push Docker image to ECR
+      - name: Push Docker image
+        run: |
+          IMAGE_TAG=${{ github.sha }}
+          ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}
+          docker push $ECR_REGISTRY/${{ env.IMAGE_REPO }}:$IMAGE_TAG
+          docker push $ECR_REGISTRY/${{ env.IMAGE_REPO }}:latest
 
-            # Run the Ansible playbook to update the container
-            ansible-playbook deploy.yml
+      # 6️⃣ Update kubeconfig
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${{ secrets.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
 
-      # Step 6️⃣ Optional: Pull latest Docker container manually (if needed)
-      - name: Pull and restart container on EC2
-        uses: appleboy/ssh-action@v0.1.6
-        with:
-          host: ${{ env.EC2_HOST }}
-          username: ${{ env.EC2_USER }}
-          key: ${{ secrets.EC2_KEY }}
-          script: |
-            docker pull 891089795316.dkr.ecr.eu-north-1.amazonaws.com/simple-js-app:latest
-            docker stop simple-js-app || true
-            docker rm simple-js-app || true
-            docker run -d --name simple-js-app -p 3000:3000 891089795316.dkr.ecr.eu-north-1.amazonaws.com/simple-js-app:latest
+      # 7️⃣ Apply Kubernetes manifests
+      - name: Deploy to EKS
+        run: |
+          kubectl apply -f kubernetes/deployment.yaml
+          kubectl apply -f kubernetes/service.yaml
